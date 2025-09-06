@@ -1,10 +1,8 @@
-from typing import Union, List, Set, Dict, Iterable, cast
-from tqdm import tqdm
-from typing import Union, List, Set, Dict, Iterable
-from typing import List, Set
-import networkx as nx
+import numpy as np
 import random
+from typing import Union, List, Set, Dict, Iterable, cast
 from tqdm import tqdm  
+import networkx as nx
 
 
 def linear_threshold(G: nx.Graph, seeds: list, steps: int = 0,
@@ -43,75 +41,49 @@ def linear_threshold(G: nx.Graph, seeds: list, steps: int = 0,
 GraphLike = Union[nx.Graph, nx.DiGraph, nx.MultiDiGraph, nx.MultiGraph]
 
 
-# GraphLike
-GraphLike = Union[nx.Graph, nx.DiGraph]
-
-
-def linear_threshold_fast(
-    G: GraphLike,
-    seeds: List[int],
-    max_steps: int = 10000,
-    show_progress: bool = False
-) -> Set[int]:
+def linear_threshold_fast(G: nx.Graph, seeds: List[int], max_steps: int = 10000, show_progress: bool = False) -> Set[int]:
     """
-    A fast implementation of the Linear Threshold (LT) diffusion model.
+    Optimized Linear Threshold diffusion model (vectorized).
     """
+    n = G.number_of_nodes()
+    nodes = list(G.nodes())
+    node_to_idx = {node: i for i, node in enumerate(nodes)}
 
-    seeds = [s for s in seeds if s in G]
+    # adjacency list (as numpy indices)
+    neighbors = [np.array([node_to_idx[v]
+                          for v in G.neighbors(u)], dtype=np.int32) for u in nodes]
 
-    thresholds: Dict[int, float] = {v: random.random() for v in G.nodes()}
-    influence: Dict[int, float] = {v: 0.0 for v in G.nodes()}
+    # degrees
+    deg = np.array([len(neigh) for neigh in neighbors], dtype=np.int32)
 
-    active: Set[int] = set(seeds)
+    # random thresholds [0,1)
+    thresholds = np.random.rand(n)
 
-    if G.is_directed():
-    
-        DG = cast(nx.DiGraph, G)
-        deg: Dict[int, int] = dict(DG.in_degree())
+    # state
+    influence = np.zeros(n, dtype=np.float32)
+    active = np.zeros(n, dtype=np.bool_)
+    newly = np.zeros(n, dtype=np.bool_)
 
-        def outnbrs(u: int) -> Iterable[int]:
-            return DG.successors(u)
-    else:
-        UG = cast(nx.Graph, G)
-        deg = dict(UG.degree())
-
-        def outnbrs(u: int) -> Iterable[int]:
-            return UG.neighbors(u)
-        
+    # initialize seeds
     for s in seeds:
-        for v in outnbrs(s):
-            if v not in active:
-                dv = deg.get(v, 0)
-                if dv > 0:
-                    influence[v] += 1.0 / dv
+        idx = node_to_idx[s]
+        active[idx] = True
+        newly[idx] = True
 
-    next_new: Set[int] = {
-        v for v in G if v not in active and influence[v] >= thresholds[v]}
-
-    pbar = tqdm(total=max_steps, desc="LT fast diffusion",
-                disable=not show_progress, ncols=80)
     steps = 0
+    while steps < max_steps and newly.any():
+        current_new = np.where(newly)[0]
+        newly[:] = False
 
-    while next_new and steps < max_steps:
-        newly = next_new
-        next_new = set()
+        for u in current_new:
+            for v in neighbors[u]:
+                if active[v] or deg[v] == 0:
+                    continue
+                influence[v] += 1.0 / deg[v]
+                if influence[v] >= thresholds[v]:
+                    newly[v] = True
+
         active |= newly
-
-        for u in newly:
-            for v in outnbrs(u):
-                if v in active:
-                    continue
-                dv = deg.get(v, 0)
-                if dv <= 0:
-                    continue
-                prev = influence[v]
-                curr = prev + (1.0 / dv)
-                if prev < thresholds[v] <= curr:
-                    next_new.add(v)
-                influence[v] = curr
-
         steps += 1
-        pbar.update(1)
 
-    pbar.close()
-    return active
+    return {nodes[i] for i, flag in enumerate(active) if flag}
